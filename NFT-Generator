@@ -1,0 +1,207 @@
+const fs = require("fs"),
+Jimp = require("jimp"),
+path = require('path');
+
+function deleteAllFilesInDirectory(directoryPath) {
+  if (fs.existsSync(directoryPath)) {
+    const files = fs.readdirSync(directoryPath);
+
+    files.forEach((file) => {
+      const filePath = path.join(directoryPath, file);
+      const fileStat = fs.statSync(filePath);
+
+      if (fileStat.isFile()) {
+        fs.unlinkSync(filePath);
+      }
+    });
+  } else {
+    console.log('Directory does not exist.');
+  }
+}
+
+// Usage
+const directoryPathImages = './output/images';
+const directoryPathMetadata = './output/metadata';
+
+deleteAllFilesInDirectory(directoryPathImages);
+deleteAllFilesInDirectory(directoryPathMetadata);
+
+const layers = [
+  { name: "Background", path: "./Layers/Background/" },
+  { name: "Clothing", path: "./Layers/Clothing/" },
+  { name: "Head", path: "./Layers/Head/" },
+  { name: "Eyes", path: "./Layers/Eyes/" },
+  { name: "Nose", path: "./Layers/Nose/" },
+  { name: "Mouth", path: "./Layers/Mouth/" }, 
+  { name: "Glasses", path: "./Layers/Glasses/" },
+  { name: "Jewelry", path: "./Layers/Jewelry/" },
+];
+
+const rarityWeights = {
+  common: 0,
+  uncommon: 0,
+  rare: 0,
+  very_rare: 0,
+  ultra_rare: 0,
+};
+
+const rarityAdjustment = {
+  common: 1,
+  uncommon: 1,
+  rare: 20, // Increase this to make rare items less frequent
+  very_rare: 100, // Increase this to make very_rare items less frequent
+  ultra_rare: 250, // Increase this to make ultra_rare items less frequent
+};
+
+const incompatibleHairImages = [
+  "",
+];
+
+const incompatibleHeadEyesImages = [
+  "",
+];
+
+function parseFileName(fileName) {
+  const [name, rarity] = fileName.split("#");
+  return { name, rarity };
+}
+
+function shuffle(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+}
+
+layers.forEach((layer) => {
+  const files = fs.readdirSync(layer.path);
+
+  files.forEach((file) => {
+    const { rarity } = parseFileName(file);
+    const weight = parseInt(rarity, 10) || 100;
+    rarityWeights[rarity] += weight;
+  });
+});
+
+const totalWeight = Object.values(rarityWeights).reduce((a, b) => a + b, 0);
+
+for (const rarity in rarityWeights) {
+  rarityWeights[rarity] = rarityWeights[rarity] / totalWeight;
+}
+
+async function getRandomImageFromLayer(layer) {
+  const files = fs.readdirSync(layer.path);
+  const weightedFiles = files.reduce((acc, file) => {
+    const { rarity } = parseFileName(file);
+    const weight = parseInt(rarity, 10) || 100;
+    const adjustedWeight = weight * (rarityWeights[rarity] || 1);
+    return acc.concat(Array(adjustedWeight).fill(file));
+  }, []);
+
+  shuffle(weightedFiles);
+
+  const randomIndex = Math.floor(Math.random() * weightedFiles.length);
+
+  return {
+    path: layer.path + weightedFiles[randomIndex],
+    fileName: weightedFiles[randomIndex],
+  };
+}
+
+
+async function generateNFT(nftCount) {
+  const uniqueNFTs = new Set();
+  const metadataList = [];
+
+  for (let i = 1; i <= nftCount; i++) {
+    const nft = new Jimp(2400, 2400, 0x00000000);
+    const attributes = [];
+	
+	let incompatibleItems = false;
+	let incompatibleHair = false;
+
+    for (const layer of layers) {
+      const { path: imageFilePath, fileName } = await getRandomImageFromLayer(layer);
+
+      if (
+        (layer.name === "Head" || layer.name === "Eyes" || layer.name === "Clothing") && incompatibleHeadEyesImages.includes(fileName)
+      ) {
+        incompatibleItems = true;
+      }
+	  
+	  if (
+		(layer.name === "Head") && incompatibleHairImages.includes(fileName)
+	  ) {
+        incompatibleHair = true;
+      }
+	  
+	  if (layer.name === "Glasses" && incompatibleHair) {
+        continue;
+      }
+	  
+	  if (layer.name === "Eyes" && incompatibleHair) {
+		attributes.push({ trait_type: "Eyes", value: "Brown Eyes" });
+        continue;
+      }
+	  
+	  if (layer.name === "Jewelry" && incompatibleHair) {
+        continue;
+      }
+
+      if (layer.name === "Glasses" && incompatibleItems) {
+        continue;
+      }
+	  
+	  if (layer.name === "Jewelry" && incompatibleItems) {
+        continue;
+      }
+
+      const image = await Jimp.read(imageFilePath);
+      nft.composite(image, 0, 0);
+	  
+	  const { rarity, name } = parseFileName(fileName);
+      attributes.push({ trait_type: layer.name, value: name });
+
+    }
+
+    const nftHash = await nft.hash();
+    if (!uniqueNFTs.has(nftHash)) {
+      uniqueNFTs.add(nftHash);
+
+      // Save the image with a numerical name
+      const nftName = `${i}`;
+      nft.write(`./output/images/${nftName}.png`, (err) => {
+        if (err) {
+          console.error("Error writing NFT image:", err);
+        } else {
+          console.log(`NFT image ${i} generated successfully!`);
+        }
+      });
+
+      // Create metadata for the NFT
+      const metadata = {
+        name: `COLLECTIONNAME #`+`${i}`,
+        description: "",
+        image: `ipfs://NewUriToReplace/${i}.png`,
+        number: i,
+        date: Date.now(),
+        uniqueId: nftHash,
+        attributes,
+        creator: "",
+      };
+
+      // Write individual JSON metadata file
+      fs.writeFileSync(`./output/metadata/${nftName}.json`, JSON.stringify(metadata, null, 2));
+
+      // Add metadata to the metadata list
+      metadataList.push(metadata);
+    } else {
+      i--; // If a duplicate is found, try again
+    }
+  }
+
+  // Write the _metadata.json file containing all metadata
+  fs.writeFileSync("./output/metadata/_metadata.json", JSON.stringify(metadataList, null, 2));
+}
+
+generateNFT(10000); // Generate unique NFTs with rarity factors
